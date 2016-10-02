@@ -72,6 +72,7 @@ import com.android.internal.R;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.telephony.uicc.UiccCard;
 import com.android.internal.telephony.uicc.UiccController;
+import com.android.internal.telephony.util.BlacklistUtils;
 import com.android.internal.util.HexDump;
 import com.android.internal.util.State;
 import com.android.internal.util.StateMachine;
@@ -143,7 +144,7 @@ public abstract class InboundSmsHandler extends StateMachine {
     /** Sent on exit from {@link WaitingState} to return to idle after sending all broadcasts. */
     private static final int EVENT_RETURN_TO_IDLE = 4;
 
-    /** Release wakelock after a short timeout when returning to idle state. */
+    /** Release wakelock on entering IdleState. */
     private static final int EVENT_RELEASE_WAKELOCK = 5;
 
     /** Sent by {@link SmsBroadcastUndelivered} after cleaning the raw table. */
@@ -154,6 +155,9 @@ public abstract class InboundSmsHandler extends StateMachine {
 
     /** New SMS received as an AsyncResult. */
     public static final int EVENT_INJECT_SMS = 8;
+
+    /** Release wakelock after a short timeout.  */
+    static final int EVENT_WAKE_LOCK_TIMEOUT = 9;
 
     /** Wakelock release delay when returning to idle state. */
     private static final int WAKELOCK_TIMEOUT = 3000;
@@ -176,6 +180,9 @@ public abstract class InboundSmsHandler extends StateMachine {
 
     /** Wake lock to ensure device stays awake while dispatching the SMS intents. */
     private final PowerManager.WakeLock mWakeLock;
+
+    /** Wakelock count to ensure that wakelock is released only when count is 0 */
+    int mWakeLockCount = 0;
 
     /** DefaultState throws an exception or logs an error for unhandled message types. */
     private final DefaultState mDefaultState = new DefaultState();
@@ -234,7 +241,8 @@ public abstract class InboundSmsHandler extends StateMachine {
 
         PowerManager pm = (PowerManager) mContext.getSystemService(Context.POWER_SERVICE);
         mWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, name);
-        mWakeLock.acquire();    // wake lock released after we enter idle state
+        mWakeLock.setReferenceCounted(false);
+        acquireWakeLock();    // wake lock released after we enter idle state
         mUserManager = (UserManager) mContext.getSystemService(Context.USER_SERVICE);
         mDeviceIdleController = TelephonyComponentFactory.getInstance().getIDeviceIdleController();
 
@@ -280,6 +288,41 @@ public abstract class InboundSmsHandler extends StateMachine {
     }
 
     /**
+     * Acquire PowerManager wakelock
+     */
+    void acquireWakeLock() {
+        synchronized (mWakeLock) {
+            mWakeLock.acquire();
+            mWakeLockCount++;
+            removeMessages(EVENT_WAKE_LOCK_TIMEOUT);
+            sendMessageDelayed(EVENT_WAKE_LOCK_TIMEOUT, WAKELOCK_TIMEOUT);
+        }
+    }
+
+    /**
+     * Decrement wakelock
+     */
+    void decrementWakeLock() {
+        synchronized (mWakeLock) {
+            mWakeLockCount--;
+            if (mWakeLockCount == 0) {
+                releaseWakeLock();
+            }
+        }
+    }
+
+    /**
+     * Release wakelock when wakelock count is 0 or when timeout occurs.
+     */
+    void releaseWakeLock() {
+        synchronized (mWakeLock) {
+            mWakeLockCount = 0;
+            mWakeLock.release();
+            removeMessages(EVENT_WAKE_LOCK_TIMEOUT);
+        }
+    }
+
+    /**
      * This parent state throws an exception (for debug builds) or prints an error for unhandled
      * message types.
      */
@@ -291,6 +334,12 @@ public abstract class InboundSmsHandler extends StateMachine {
                     onUpdatePhoneObject((Phone) msg.obj);
                     break;
                 }
+
+                case EVENT_WAKE_LOCK_TIMEOUT:
+                    loge("Release wakelock as it timed out");
+                    releaseWakeLock();
+                    break;
+
                 default: {
                     String errorText = "processMessage: unhandled message type " + msg.what +
                         " currState=" + getCurrentState().getName();
@@ -350,12 +399,12 @@ public abstract class InboundSmsHandler extends StateMachine {
         @Override
         public void enter() {
             if (DBG) log("entering Idle state");
-            sendMessageDelayed(EVENT_RELEASE_WAKELOCK, WAKELOCK_TIMEOUT);
+            sendMessage(EVENT_RELEASE_WAKELOCK);
         }
 
         @Override
         public void exit() {
-            mWakeLock.acquire();
+            acquireWakeLock();
             if (DBG) log("acquired wakelock, leaving Idle state");
         }
 
@@ -372,13 +421,14 @@ public abstract class InboundSmsHandler extends StateMachine {
                     return HANDLED;
 
                 case EVENT_RELEASE_WAKELOCK:
-                    mWakeLock.release();
+                    decrementWakeLock();
                     if (DBG) {
                         if (mWakeLock.isHeld()) {
                             // this is okay as long as we call release() for every acquire()
-                            log("mWakeLock is still held after release");
+                            log("mWakeLock is still held after release wakelockcount = "
+                                    + mWakeLockCount);
                         } else {
-                            log("mWakeLock released");
+                            log("mWakeLock released wakelockcount = " + mWakeLockCount);
                         }
                     }
                     return HANDLED;
@@ -451,10 +501,11 @@ public abstract class InboundSmsHandler extends StateMachine {
                     return HANDLED;
 
                 case EVENT_RELEASE_WAKELOCK:
-                    mWakeLock.release();    // decrement wakelock from previous entry to Idle
+                    decrementWakeLock(); // decrement wakelock from previous entry to Idle
                     if (!mWakeLock.isHeld()) {
                         // wakelock should still be held until 3 seconds after we enter Idle
-                        loge("mWakeLock released while delivering/broadcasting!");
+                        loge("mWakeLock released while delivering/broadcasting! wakelockcount = "
+                                + mWakeLockCount);
                     }
                     return HANDLED;
 
@@ -508,20 +559,40 @@ public abstract class InboundSmsHandler extends StateMachine {
             return;
         }
 
-        int result;
+        int result, blacklistMatchType = -1;
+        SmsMessage sms = null;
+
         try {
-            SmsMessage sms = (SmsMessage) ar.result;
+            sms = (SmsMessage) ar.result;
             result = dispatchMessage(sms.mWrappedSmsMessage);
         } catch (RuntimeException ex) {
             loge("Exception dispatching message", ex);
             result = Intents.RESULT_SMS_GENERIC_ERROR;
         }
 
+        // Translate (internal) blacklist check results to
+        // RESULT_SMS_HANDLED + match type
+        switch (result) {
+            case Intents.RESULT_SMS_BLACKLISTED_UNKNOWN:
+                blacklistMatchType = BlacklistUtils.MATCH_UNKNOWN;
+                result = Intents.RESULT_SMS_HANDLED;
+                break;
+            case Intents.RESULT_SMS_BLACKLISTED_LIST:
+                blacklistMatchType = BlacklistUtils.MATCH_LIST;
+                result = Intents.RESULT_SMS_HANDLED;
+                break;
+            case Intents.RESULT_SMS_BLACKLISTED_REGEX:
+                blacklistMatchType = BlacklistUtils.MATCH_REGEX;
+                result = Intents.RESULT_SMS_HANDLED;
+                break;
+        }
+
+
         // RESULT_OK means that the SMS will be acknowledged by special handling,
         // e.g. for SMS-PP data download. Any other result, we should ack here.
         if (result != Activity.RESULT_OK) {
             boolean handled = (result == Intents.RESULT_SMS_HANDLED);
-            notifyAndAcknowledgeLastIncomingSms(handled, result, null);
+            notifyAndAcknowledgeLastIncomingSms(handled, result, blacklistMatchType, sms, null);
         }
     }
 
@@ -628,14 +699,26 @@ public abstract class InboundSmsHandler extends StateMachine {
      * and send an acknowledge message to the network.
      * @param success indicates that last message was successfully received.
      * @param result result code indicating any error
+     * @param blacklistMatchType blacklist type if the message was blacklisted,
+     *                           -1 if it wasn't blacklisted
+     * @param sms incoming SMS
      * @param response callback message sent when operation completes.
      */
     private void notifyAndAcknowledgeLastIncomingSms(boolean success,
-            int result, Message response) {
-        if (!success) {
+            int result, int blacklistMatchType, SmsMessage sms, Message response) {
+        if (!success || blacklistMatchType >= 0) {
             // broadcast SMS_REJECTED_ACTION intent
             Intent intent = new Intent(Intents.SMS_REJECTED_ACTION);
             intent.putExtra("result", result);
+            intent.putExtra("blacklisted", blacklistMatchType >= 0);
+            if (blacklistMatchType >= 0) {
+                intent.putExtra("blacklistMatchType", blacklistMatchType);
+            }
+            if (sms != null) {
+                intent.putExtra("sender", sms.getOriginatingAddress());
+                intent.putExtra("timestamp", sms.getTimestampMillis());
+            }
+            if (DBG) log("notifyAndAcknowledgeLastIncomingSms(): reject intent= " + intent);
             mContext.sendBroadcast(intent, android.Manifest.permission.RECEIVE_SMS);
         }
         acknowledgeLastIncomingSms(success, result, response);
@@ -657,6 +740,11 @@ public abstract class InboundSmsHandler extends StateMachine {
      * @return {@link Intents#RESULT_SMS_HANDLED} if the message was accepted, or an error status
      */
     protected int dispatchNormalMessage(SmsMessageBase sms) {
+        int blacklistResult = checkIfBlacklisted(sms);
+        if (blacklistResult != Intents.RESULT_SMS_HANDLED) {
+            return blacklistResult;
+        }
+
         SmsHeader smsHeader = sms.getUserDataHeader();
         InboundSmsTracker tracker;
 
@@ -690,6 +778,22 @@ public abstract class InboundSmsHandler extends StateMachine {
         // destPort = -1 indicates text messages, otherwise it's a data sms
         return addTrackerToRawTableAndSendMessage(tracker,
                 tracker.getDestPort() == -1 /* de-dup if text message */);
+    }
+
+    private int checkIfBlacklisted(SmsMessageBase sms) {
+        int result = BlacklistUtils.isListed(mContext,
+                sms.getOriginatingAddress(), BlacklistUtils.BLOCK_MESSAGES);
+
+        switch (result) {
+            case BlacklistUtils.MATCH_UNKNOWN:
+                return Intents.RESULT_SMS_BLACKLISTED_UNKNOWN;
+            case BlacklistUtils.MATCH_LIST:
+                return Intents.RESULT_SMS_BLACKLISTED_LIST;
+            case BlacklistUtils.MATCH_REGEX:
+                return Intents.RESULT_SMS_BLACKLISTED_REGEX;
+        }
+
+        return Intents.RESULT_SMS_HANDLED;
     }
 
     /**
@@ -1529,5 +1633,10 @@ public abstract class InboundSmsHandler extends StateMachine {
     @VisibleForTesting
     public int getWakeLockTimeout() {
         return WAKELOCK_TIMEOUT;
+    }
+
+    @VisibleForTesting
+    public int getWakelockCount() {
+        return mWakeLockCount;
     }
 }

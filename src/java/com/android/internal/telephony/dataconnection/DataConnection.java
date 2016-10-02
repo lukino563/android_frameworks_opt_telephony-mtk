@@ -812,6 +812,7 @@ public class DataConnection extends StateMachine {
                     sizes = TCP_BUFFER_SIZES_HSPA;
                     break;
                 case ServiceState.RIL_RADIO_TECHNOLOGY_LTE:
+                case ServiceState.RIL_RADIO_TECHNOLOGY_LTE_CA:
                     sizes = TCP_BUFFER_SIZES_LTE;
                     break;
                 case ServiceState.RIL_RADIO_TECHNOLOGY_HSPAP:
@@ -910,6 +911,7 @@ public class DataConnection extends StateMachine {
             case ServiceState.RIL_RADIO_TECHNOLOGY_HSPA: up = 5898; down = 14336; break;
             case ServiceState.RIL_RADIO_TECHNOLOGY_EVDO_B: up = 1843; down = 5017; break;
             case ServiceState.RIL_RADIO_TECHNOLOGY_LTE: up = 51200; down = 102400; break;
+            case ServiceState.RIL_RADIO_TECHNOLOGY_LTE_CA: up = 51200; down = 102400; break;
             case ServiceState.RIL_RADIO_TECHNOLOGY_EHRPD: up = 153; down = 2516; break;
             case ServiceState.RIL_RADIO_TECHNOLOGY_HSPAP: up = 11264; down = 43008; break;
             default:
@@ -1478,6 +1480,10 @@ public class DataConnection extends StateMachine {
     }
     private DcActivatingState mActivatingState = new DcActivatingState();
 
+    public final boolean hasMessages(int what, Object object) {
+        return DataConnection.this.getHandler().hasMessages(what, object);
+    }
+
     /**
      * The state machine is connected, expecting an EVENT_DISCONNECT.
      */
@@ -1487,10 +1493,12 @@ public class DataConnection extends StateMachine {
 
             boolean createNetworkAgent = true;
             // If a disconnect is already pending, avoid notifying all of connected
-            if (hasMessages(EVENT_DISCONNECT) ||
-                    hasMessages(EVENT_DISCONNECT_ALL) ||
-                    hasDeferredMessages(EVENT_DISCONNECT) ||
-                    hasDeferredMessages(EVENT_DISCONNECT_ALL)) {
+            if (hasMessages(EVENT_DISCONNECT, mConnectionParams.mOnCompletedMsg.obj) ||
+                    hasMessages(EVENT_DISCONNECT_ALL, mConnectionParams.
+                    mOnCompletedMsg.obj) || hasDeferredMessages(EVENT_DISCONNECT,
+                    mConnectionParams.mOnCompletedMsg.obj) ||
+                    hasDeferredMessages(EVENT_DISCONNECT_ALL, mConnectionParams.
+                    mOnCompletedMsg.obj)) {
                 log("DcActiveState: skipping notifyAllOfConnected()");
                 createNetworkAgent = false;
             } else {

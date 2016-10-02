@@ -21,6 +21,7 @@ import com.android.internal.telephony.dataconnection.DataProfile;
 import com.android.internal.telephony.gsm.SmsBroadcastConfigInfo;
 import com.android.internal.telephony.RadioCapability;
 import com.android.internal.telephony.uicc.IccCardStatus;
+import com.android.internal.telephony.uicc.SimPhoneBookAdnRecord;
 
 import android.os.Message;
 import android.os.Handler;
@@ -1682,6 +1683,12 @@ public interface CommandsInterface {
     public int getLteOnCdmaMode();
 
     /**
+     * Return if the current radio is LTE on GSM
+     * @hide
+     */
+    public int getLteOnGsmMode();
+
+    /**
      * Request the ISIM application on the UICC to perform the AKA
      * challenge/response algorithm for IMS authentication. The nonce string
      * and challenge response are Base64 encoded Strings.
@@ -1798,6 +1805,16 @@ public interface CommandsInterface {
     public void iccOpenLogicalChannel(String AID, Message response);
 
     /**
+     * Open a logical channel to the SIM.
+     *
+     * @param p2 P2 parameter
+     * @param AID application id.
+     * @param response Callback message. response.obj will be an int [1]
+                element [0] set to the id of the logical channel.
+     */
+    public void iccOpenLogicalChannel(String AID, byte p2, Message response);
+
+    /**
      * Close a previously opened logical channel to the SIM.
      *
      * Input parameters equivalent to TS 27.007 AT+CCHC command.
@@ -1844,6 +1861,13 @@ public interface CommandsInterface {
      */
     public void iccTransmitApduBasicChannel(int cla, int instruction, int p1, int p2,
             int p3, String data, Message response);
+
+    /**
+     * Get ATR (Answer To Reset; as per ISO/IEC 7816-4) from SIM card
+     *
+     * @param response Callback message
+     */
+    public void getAtr(Message response);
 
     /**
      * Read one of the NV items defined in {@link RadioNVItems} / {@code ril_nv_items.h}.
@@ -1900,20 +1924,15 @@ public interface CommandsInterface {
    /**
      * Sets user selected subscription at Modem.
      *
-     * @param slotId
-     *          Slot.
      * @param appIndex
      *          Application index in the card.
-     * @param subId
-     *          Indicates subscription 0 or subscription 1.
-     * @param subStatus
-     *          Activation status, 1 = activate and 0 = deactivate.
+     * @param activate
+     *          Whether to activate or deactivate the subscription
      * @param result
      *          Callback message contains the information of SUCCESS/FAILURE.
      */
     // FIXME Update the doc and consider modifying the request to make more generic.
-    public void setUiccSubscription(int slotId, int appIndex, int subId, int subStatus,
-            Message result);
+    public void setUiccSubscription(int appIndex, boolean activate, Message result);
 
     /**
      * Tells the modem if data is allowed or not.
@@ -2017,4 +2036,51 @@ public interface CommandsInterface {
      * @param result Callback message contains the modem activity information
      */
     public void getModemActivityInfo(Message result);
+
+    /**
+     * Request the ADN record of all activated UICC applications
+     *
+     * @param result Callback message containing the count of ADN valid record.
+     */
+    public void getAdnRecord(Message result);
+
+    /**
+     * Request to add/delete/update the ADN record
+     *
+     * @param adnRecordInfo adn record information to be updated
+     * @param result Callback message containing the ADN record index.
+     */
+    public void updateAdnRecord(SimPhoneBookAdnRecord adnRecordInfo, Message result);
+
+    /**
+     * Registers the handler when ADN has already init done.
+     *
+     * @param h Handler for notification message.
+     * @param what User-defined message code.
+     * @param obj User object.
+     */
+    public void registerForAdnInitDone(Handler h, int what, Object obj);
+
+    /**
+     * Unregister for notifications when ADN has already init done.
+     *
+     * @param h Handler to be removed from the registrant list.
+     */
+    public void unregisterForAdnInitDone(Handler h);
+
+    /**
+     * Registers the handler when a group of ADN record is notified.
+     *
+     * @param h Handler for notification message.
+     * @param what User-defined message code.
+     * @param obj User object.
+     */
+    public void registerForAdnRecordsInfo(Handler h, int what, Object obj);
+
+    /**
+     * Unregister for notifications when a group of ADN record is notified.
+     *
+     * @param h Handler to be removed from the registrant list.
+     */
+    public void unregisterForAdnRecordsInfo(Handler h);
 }

@@ -46,6 +46,7 @@ import android.view.WindowManager;
 
 import com.android.internal.telephony.CommandsInterface;
 import com.android.internal.telephony.CommandsInterface.RadioState;
+import com.android.internal.telephony.RIL;
 import com.android.internal.telephony.uicc.IccCardApplicationStatus.AppType;
 import com.android.internal.telephony.uicc.IccCardStatus.CardState;
 import com.android.internal.telephony.uicc.IccCardStatus.PinState;
@@ -85,6 +86,7 @@ public class UiccCard {
     private CatService mCatService;
     private RadioState mLastRadioState =  RadioState.RADIO_UNAVAILABLE;
     private UiccCarrierPrivilegeRules mCarrierPrivilegeRules;
+    private boolean mDefaultAppsActivated;
 
     private RegistrantList mAbsentRegistrants = new RegistrantList();
     private RegistrantList mCarrierPrivilegeRegistrants = new RegistrantList();
@@ -97,6 +99,7 @@ public class UiccCard {
     private static final int EVENT_TRANSMIT_APDU_BASIC_CHANNEL_DONE = 18;
     private static final int EVENT_SIM_IO_DONE = 19;
     private static final int EVENT_CARRIER_PRIVILIGES_LOADED = 20;
+    private static final int EVENT_SIM_GET_ATR_DONE = 21;
 
     private static final LocalLog mLocalLog = new LocalLog(100);
 
@@ -191,8 +194,28 @@ public class UiccCard {
                     mHandler.sendMessage(mHandler.obtainMessage(EVENT_CARD_ADDED, null));
                 }
             }
+            if (needsSimActivation()) {
+                if (mCardState == CardState.CARDSTATE_PRESENT) {
+                    if (!mDefaultAppsActivated) {
+                        activateDefaultApps();
+                        mDefaultAppsActivated = true;
+                    }
+                } else {
+                    // SIM removed, reset activation flag to make sure
+                    // to re-run the activation at the next insertion
+                    mDefaultAppsActivated = false;
+                }
+            }
+
             mLastRadioState = radioState;
         }
+    }
+
+    private boolean needsSimActivation() {
+        if (mCi instanceof RIL) {
+            return ((RIL) mCi).needsOldRilFeature("simactivation");
+        }
+        return false;
     }
 
     protected void createAndUpdateCatService() {
@@ -254,6 +277,34 @@ public class UiccCard {
 
         // Seems to be valid
         return index;
+    }
+
+    private void activateDefaultApps() {
+        int gsmIndex = mGsmUmtsSubscriptionAppIndex;
+        int cdmaIndex = mCdmaSubscriptionAppIndex;
+
+        if (gsmIndex < 0 || cdmaIndex < 0) {
+            for (int i = 0; i < mUiccApplications.length; i++) {
+                if (mUiccApplications[i] == null) {
+                    continue;
+                }
+
+                AppType appType = mUiccApplications[i].getType();
+                if (gsmIndex < 0
+                        && (appType == AppType.APPTYPE_USIM || appType == AppType.APPTYPE_SIM)) {
+                    gsmIndex = i;
+                } else if (cdmaIndex < 0 &&
+                        (appType == AppType.APPTYPE_CSIM || appType == AppType.APPTYPE_RUIM)) {
+                    cdmaIndex = i;
+                }
+            }
+        }
+        if (gsmIndex >= 0) {
+            mCi.setUiccSubscription(gsmIndex, true, null);
+        }
+        if (cdmaIndex >= 0) {
+            mCi.setUiccSubscription(cdmaIndex, true, null);
+        }
     }
 
     /**
@@ -387,6 +438,7 @@ public class UiccCard {
                 case EVENT_TRANSMIT_APDU_LOGICAL_CHANNEL_DONE:
                 case EVENT_TRANSMIT_APDU_BASIC_CHANNEL_DONE:
                 case EVENT_SIM_IO_DONE:
+                case EVENT_SIM_GET_ATR_DONE:
                     AsyncResult ar = (AsyncResult)msg.obj;
                     if (ar.exception != null) {
                         loglocal("Exception: " + ar.exception);
@@ -586,6 +638,13 @@ public class UiccCard {
                 mHandler.obtainMessage(EVENT_OPEN_LOGICAL_CHANNEL_DONE, response));
     }
 
+    public void iccOpenLogicalChannel(String AID, byte p2, Message response) {
+        loglocal("Open Logical Channel: " + AID + " , " + p2 + " by pid:" + Binder.getCallingPid()
+                + " uid:" + Binder.getCallingUid());
+        mCi.iccOpenLogicalChannel(AID,
+                p2, mHandler.obtainMessage(EVENT_OPEN_LOGICAL_CHANNEL_DONE, response));
+    }
+
     /**
      * Exposes {@link CommandsInterface.iccCloseLogicalChannel}
      */
@@ -620,6 +679,13 @@ public class UiccCard {
             String pathID, Message response) {
         mCi.iccIO(command, fileID, pathID, p1, p2, p3, null, null,
                 mHandler.obtainMessage(EVENT_SIM_IO_DONE, response));
+    }
+
+    /**
+     * Exposes {@link CommandsInterface.getAtr}
+     */
+    public void getAtr(Message response) {
+        mCi.getAtr(mHandler.obtainMessage(EVENT_SIM_GET_ATR_DONE, response));
     }
 
     /**

@@ -25,6 +25,7 @@ import com.android.internal.telephony.UUSInfo;
 import com.android.internal.telephony.cdma.CdmaSmsBroadcastConfigInfo;
 import com.android.internal.telephony.dataconnection.DataProfile;
 import com.android.internal.telephony.gsm.SmsBroadcastConfigInfo;
+import com.android.internal.telephony.uicc.SimPhoneBookAdnRecord;
 
 public class SimulatedCommandsVerifier implements CommandsInterface {
     private static SimulatedCommandsVerifier sInstance;
@@ -1182,6 +1183,11 @@ public class SimulatedCommandsVerifier implements CommandsInterface {
     }
 
     @Override
+    public int getLteOnGsmMode() {
+        return 0;
+    }
+
+    @Override
     public void requestIsimAuthentication(String nonce, Message response) {
 
     }
@@ -1286,8 +1292,7 @@ public class SimulatedCommandsVerifier implements CommandsInterface {
     }
 
     @Override
-    public void setUiccSubscription(int slotId, int appIndex, int subId, int subStatus,
-                                    Message result) {
+    public void setUiccSubscription(int appIndex, boolean activate, Message result) {
 
     }
 
@@ -1350,4 +1355,43 @@ public class SimulatedCommandsVerifier implements CommandsInterface {
     public void getModemActivityInfo(Message result) {
 
     }
+
+    @Override
+    public void iccOpenLogicalChannel(String AID, byte p2, Message response) {
+
+    }
+
+    @Override
+    public void getAtr(Message response) {
+
+    }
+
+    @Override
+    public void getAdnRecord(Message result){
+
+    }
+
+    @Override
+    public void updateAdnRecord(SimPhoneBookAdnRecord adnRecordInfo, Message result){
+
+    }
+
+    @Override
+    public void registerForAdnInitDone(Handler h, int what, Object obj){
+
+    }
+
+    @Override
+    public void unregisterForAdnInitDone(Handler h){
+
+    }
+
+    public void registerForAdnRecordsInfo(Handler h, int what, Object obj){
+
+    }
+
+    public void unregisterForAdnRecordsInfo(Handler h){
+
+    }
+
 }

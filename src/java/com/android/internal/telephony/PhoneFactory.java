@@ -46,6 +46,7 @@ import com.android.internal.util.IndentingPrintWriter;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
+import java.lang.reflect.Constructor;
 import java.util.HashMap;
 
 /**
@@ -128,6 +129,19 @@ public class PhoneFactory {
                 }
 
                 sPhoneNotifier = new DefaultPhoneNotifier();
+                TelephonyComponentFactory telephonyComponentFactory
+                    = TelephonyComponentFactory.getInstance();
+
+                // Get preferred network mode
+                int preferredNetworkMode = RILConstants.PREFERRED_NETWORK_MODE;
+                if (preferredNetworkMode < RILConstants.NETWORK_MODE_TDSCDMA_ONLY) {
+                    if (TelephonyManager.getLteOnCdmaModeStatic() == PhoneConstants.LTE_ON_CDMA_TRUE) {
+                        preferredNetworkMode = Phone.NT_MODE_GLOBAL;
+                    }
+                    if (TelephonyManager.getLteOnGsmModeStatic() != 0) {
+                        preferredNetworkMode = Phone.NT_MODE_LTE_GSM_WCDMA;
+                    }
+                }
 
                 int cdmaSubscription = CdmaSubscriptionSourceManager.getDefault(context);
                 Rlog.i(LOG_TAG, "Cdma Subscription set to " + cdmaSubscription);
@@ -140,19 +154,33 @@ public class PhoneFactory {
                 sPhones = new Phone[numPhones];
                 sCommandsInterfaces = new RIL[numPhones];
                 sTelephonyNetworkFactories = new TelephonyNetworkFactory[numPhones];
+                String sRILClassname = SystemProperties.get("ro.telephony.ril_class", "RIL").trim();
+                Rlog.i(LOG_TAG, "RILClassname is " + sRILClassname);
 
                 for (int i = 0; i < numPhones; i++) {
                     // reads the system properties and makes commandsinterface
                     // Get preferred network type.
-                    networkModes[i] = RILConstants.PREFERRED_NETWORK_MODE;
+                    networkModes[i] = preferredNetworkMode;
 
                     Rlog.i(LOG_TAG, "Network Mode set to " + Integer.toString(networkModes[i]));
-                    sCommandsInterfaces[i] = new RIL(context, networkModes[i],
-                            cdmaSubscription, i);
+                    // Use reflection to construct the RIL class (defaults to RIL)
+                    try {
+                        sCommandsInterfaces[i] = instantiateCustomRIL(
+                                sRILClassname, context, networkModes[i], cdmaSubscription, i);
+                    } catch (Exception e) {
+                        // 6 different types of exceptions are thrown here that it's easier to just
+                        // catch Exception as our "error handling" is the same. Yes, we're blocking
+                        // the whole thing and making the radio unusable. That's by design.
+                        // The log message should make it clear why the radio is broken
+                        while (true) {
+                            Rlog.e(LOG_TAG, "Unable to construct custom RIL class", e);
+                            try { Thread.sleep(10000); } catch (InterruptedException ie) {}
+                        }
+                    }
                 }
                 Rlog.i(LOG_TAG, "Creating SubscriptionController");
-                SubscriptionController.init(context, sCommandsInterfaces);
-
+                telephonyComponentFactory.initSubscriptionController(
+                        context, sCommandsInterfaces);
                 // Instantiate UiccController so that all other classes can just
                 // call getInstance()
                 sUiccController = UiccController.make(context, sCommandsInterfaces);
@@ -161,15 +189,15 @@ public class PhoneFactory {
                     Phone phone = null;
                     int phoneType = TelephonyManager.getPhoneType(networkModes[i]);
                     if (phoneType == PhoneConstants.PHONE_TYPE_GSM) {
-                        phone = new GsmCdmaPhone(context,
+                        phone = telephonyComponentFactory.makePhone(context,
                                 sCommandsInterfaces[i], sPhoneNotifier, i,
                                 PhoneConstants.PHONE_TYPE_GSM,
-                                TelephonyComponentFactory.getInstance());
+                                telephonyComponentFactory);
                     } else if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
-                        phone = new GsmCdmaPhone(context,
+                        phone = telephonyComponentFactory.makePhone(context,
                                 sCommandsInterfaces[i], sPhoneNotifier, i,
-                                PhoneConstants.PHONE_TYPE_CDMA_LTE,
-                                TelephonyComponentFactory.getInstance());
+                                PhoneConstants.PHONE_TYPE_CDMA,
+                                telephonyComponentFactory);
                     }
                     Rlog.i(LOG_TAG, "Creating Phone with type = " + phoneType + " sub = " + i);
 
@@ -198,8 +226,8 @@ public class PhoneFactory {
                 sMadeDefaults = true;
 
                 Rlog.i(LOG_TAG, "Creating SubInfoRecordUpdater ");
-                sSubInfoRecordUpdater = new SubscriptionInfoUpdater(context,
-                        sPhones, sCommandsInterfaces);
+                sSubInfoRecordUpdater = telephonyComponentFactory.makeSubscriptionInfoUpdater(
+                        context, sPhones, sCommandsInterfaces);
                 SubscriptionController.getInstance().updatePhonesAvailability(sPhones);
 
                 // Start monitoring after defaults have been made.
@@ -215,7 +243,8 @@ public class PhoneFactory {
 
                 sSubscriptionMonitor = new SubscriptionMonitor(tr, sContext, sc, numPhones);
 
-                sPhoneSwitcher = new PhoneSwitcher(MAX_ACTIVE_PHONES, numPhones,
+                sPhoneSwitcher = telephonyComponentFactory.
+                        makePhoneSwitcher (MAX_ACTIVE_PHONES, numPhones,
                         sContext, sc, Looper.myLooper(), tr, sCommandsInterfaces,
                         sPhones);
 
@@ -228,8 +257,21 @@ public class PhoneFactory {
                             sPhoneSwitcher, sc, sSubscriptionMonitor, Looper.myLooper(),
                             sContext, i, sPhones[i].mDcTracker);
                 }
+
+                telephonyComponentFactory.makeExtTelephonyClasses(
+                        context, sPhones, sCommandsInterfaces);
             }
         }
+    }
+
+    private static <T> T instantiateCustomRIL(String sRILClassname, Context context,
+                                        int networkMode, int cdmaSubscription, Integer instanceId)
+                                        throws Exception {
+        Class<?> clazz = Class.forName("com.android.internal.telephony." + sRILClassname);
+        Constructor<?> constructor = clazz.getConstructor(
+                                            Context.class, int.class, int.class, Integer.class);
+        return (T) clazz.cast(constructor.newInstance(
+                                            context, networkMode, cdmaSubscription, instanceId));
     }
 
     public static Phone getDefaultPhone() {
